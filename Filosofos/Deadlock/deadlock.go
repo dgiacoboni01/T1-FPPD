@@ -1,7 +1,7 @@
 // -----------------------------------------------------------------------------
-// File: solution.go
+// File: deadlock.go
 //
-// Desc: Implementacao da primeira solucao do exercicio 1.
+// Desc: Implementacao do deadlock do exercicio 1.
 //
 // Authors: Grupo F.
 // -----------------------------------------------------------------------------
@@ -64,9 +64,9 @@ func Hungry( philosopher *philosopher_t ) {
 
 //-----------------------------------------------------------------------------
 // Name: PickFork()
-// Desc: Faz o primeiro filosofo (indice 0) pegar o garfo esquerdo primeiro,
-//		 dessa forma, o deadlock eh quebrado pois uma das condicoes de coffman
-//		 nao e satisfeita.
+// Desc: Todos os filosofos pegam o garfo direito primeiro, depois o esquerdo.
+//       Isso causa deadlock pois todos ficam esperando o garfo do vizinho,
+//       satisfazendo a condicao de espera circular de Coffman.
 //-----------------------------------------------------------------------------
 func PickFork( idx int, philosophers []*philosopher_t, fork []chan struct{} ) {
 	left  := idx
@@ -74,16 +74,10 @@ func PickFork( idx int, philosophers []*philosopher_t, fork []chan struct{} ) {
 
 	fmt.Printf( "Filosofo %d tentando pegar garfos\n", philosophers[idx].uid )
 
-	// o primeiro filosofo usa o garfo esquerdo
-	if philosophers[ idx ].uid == 0 {
-		<-fork[ left ]
-		<-fork[ right ]
-
-		fmt.Printf( "Filosofo 0 pegou os garfos\n" )
-		return
-	}
-
 	<-fork[ right ]
+
+	time.Sleep( time.Millisecond * 10 )
+
 	<-fork[ left ]
 
 	fmt.Printf( "Filosofo %d pegou os garfos\n", philosophers[idx].uid )
@@ -103,10 +97,8 @@ func ReleaseFork( idx int, fork []chan struct{} ) {
 
 //-----------------------------------------------------------------------------
 // Name: Dine()
-// Desc: Logica principal. Se o filosofo estiver com fome, ele pega o garfo.
-//		 Depois, ele come. Apos determinado tempo (time.sleep para verificar
-//		 data race), ele solta o garfo e volta a pensar por determinado tempo.
-// 		 Repete N vezes
+// Desc: Logica principal. A gente causa o deadlock pela comdicao de espera
+//		 circular (todos pegam o garfo direito e depois o esquerdo).
 //-----------------------------------------------------------------------------
 func Dine( idx int, philosophers []*philosopher_t, fork []chan struct{}, wg *sync.WaitGroup ) {
 	defer wg.Done()
@@ -126,7 +118,6 @@ func Dine( idx int, philosophers []*philosopher_t, fork []chan struct{}, wg *syn
 		}
 
 		Think( philosophers[idx] )
-		time.Sleep( time.Millisecond * 10 ) // garantir fairness. Evita que algum filosofo que acabou de comer seja reescalonado hiper rapido e pegue de novo os gaarfos.
 	}
 }
 
@@ -144,8 +135,8 @@ func main() {
 
 	for idx := range kSize {
 		philosophers[ idx ] = &philosopher_t{ uid: uint8( idx ) }
-		forks[ idx ] 		= make( chan struct{}, 1 )
-		forks[ idx ] 		<- struct{}{}
+		forks[ idx ] = make( chan struct{}, 1 )
+		forks[ idx ] <- struct{}{}
 	}
 
 	for idx := range kSize {

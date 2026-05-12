@@ -1,7 +1,7 @@
 // -----------------------------------------------------------------------------
-// File: solution.go
+// File: solution2.go
 //
-// Desc: Implementacao da primeira solucao do exercicio 1.
+// Desc: Implementacao da segunda solucao do exercicio 1, usando monitores.
 //
 // Authors: Grupo F.
 // -----------------------------------------------------------------------------
@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 type state_t uint8
@@ -27,6 +26,12 @@ type philosopher_t struct {
 	uid			uint8
 	state 		state_t
 	meals		uint32
+}
+
+type monitor_t struct {
+	forks		[]chan struct{}
+	mu			sync.Mutex
+	cond		*sync.Cond
 }
 
 //-----------------------------------------------------------------------------
@@ -64,95 +69,107 @@ func Hungry( philosopher *philosopher_t ) {
 
 //-----------------------------------------------------------------------------
 // Name: PickFork()
-// Desc: Faz o primeiro filosofo (indice 0) pegar o garfo esquerdo primeiro,
-//		 dessa forma, o deadlock eh quebrado pois uma das condicoes de coffman
-//		 nao e satisfeita.
+// Desc: Tenta adquirir os dois garfos via select. Se o garfo direito nao esti
+//		 ver disponivel, devolve o esquerdo ja adquirido e dorme via cond.Wait()
+//		 ate ser acordado pelo Broadcast do ReleaseFork. A condicao de posse e
+//		 espera eh quebrada.
 //-----------------------------------------------------------------------------
-func PickFork( idx int, philosophers []*philosopher_t, fork []chan struct{} ) {
+func PickFork( idx int, philosopher *philosopher_t, monitor *monitor_t ) {
 	left  := idx
 	right := ( idx + 1 ) % kSize
 
-	fmt.Printf( "Filosofo %d tentando pegar garfos\n", philosophers[idx].uid )
+	monitor.mu.Lock()
 
-	// o primeiro filosofo usa o garfo esquerdo
-	if philosophers[ idx ].uid == 0 {
-		<-fork[ left ]
-		<-fork[ right ]
+	fmt.Printf( "Filosofo %d tentando pegar os garfos\n", philosopher.uid )
 
-		fmt.Printf( "Filosofo 0 pegou os garfos\n" )
-		return
+	for {
+		select {
+			case <-monitor.forks[ left ]: {
+				select {
+					case <-monitor.forks[ right ]: {
+						monitor.mu.Unlock()
+						fmt.Printf( "Filosofo %d pegou os garfos\n", philosopher.uid )
+						return
+					}
+					default: {
+						monitor.forks[ left ] <- struct{}{} // devolve o esquerdo
+						monitor.cond.Wait()
+					}
+				}
+			}
+			default: {
+				monitor.cond.Wait()
+			}
+		}
 	}
-
-	<-fork[ right ]
-	<-fork[ left ]
-
-	fmt.Printf( "Filosofo %d pegou os garfos\n", philosophers[idx].uid )
 }
 
 //-----------------------------------------------------------------------------
 // Name: ReleaseFork()
-// Desc: Faz o filosofo soltar o garfo.
+// Desc: Devolve os dois garfos aos channels e acorda todos os filosofos que
+//		 estao dormindo via Broadcast, permitindo que tentem de novo.
 //-----------------------------------------------------------------------------
-func ReleaseFork( idx int, fork []chan struct{} ) {
+func ReleaseFork( idx int, monitor *monitor_t ) {
 	left  := idx
 	right := ( idx + 1 ) % kSize
 
-	fork[ left ]  <- struct{}{}
-	fork[ right ] <- struct{}{}
+	monitor.mu.Lock()
+
+	monitor.forks[ left ]  <- struct{}{}
+	monitor.forks[ right ] <- struct{}{}
+
+	monitor.cond.Broadcast()
+	monitor.mu.Unlock()
 }
 
 //-----------------------------------------------------------------------------
 // Name: Dine()
-// Desc: Logica principal. Se o filosofo estiver com fome, ele pega o garfo.
-//		 Depois, ele come. Apos determinado tempo (time.sleep para verificar
-//		 data race), ele solta o garfo e volta a pensar por determinado tempo.
-// 		 Repete N vezes
+// Desc: Logica principal. O ciclo de vida do filosofo: fica com fome, tenta pe
+//		 gar os garfos via monitor, come, solta os garfos e volta a pensar.
 //-----------------------------------------------------------------------------
-func Dine( idx int, philosophers []*philosopher_t, fork []chan struct{}, wg *sync.WaitGroup ) {
+func Dine( idx int, philosophers []*philosopher_t, monitor *monitor_t, wg *sync.WaitGroup ) {
 	defer wg.Done()
 
 	for n := 0; n < 5; n++ {
 		Hungry( philosophers[idx] )
 
 		if philosophers[ idx ].state & kHungry != 0 {
-			PickFork( idx, philosophers, fork )
+			PickFork( idx, philosophers[idx], monitor )
 		}
 
 		Eat( philosophers[idx] )
 
 		if philosophers[ idx ].state & kEating != 0 {
-			time.Sleep( time.Microsecond * 10 )
-			ReleaseFork( idx, fork )
+			ReleaseFork( idx, monitor )
 		}
 
 		Think( philosophers[idx] )
-		time.Sleep( time.Millisecond * 10 ) // garantir fairness. Evita que algum filosofo que acabou de comer seja reescalonado hiper rapido e pegue de novo os gaarfos.
 	}
 }
 
 //-----------------------------------------------------------------------------
 // Name: main()
-// Desc: Ponto de inicio. Inicializa os filosofos (ponteiro que aponta pra uma
-//		 lista de ponteiros de filosofos), depois inicializa os garfos (aqui eh
-//		 um canal com tamanho um, simulando um mutex). A gente usa waitGroup
-//		 para garantir que o main nao acabe antes de todo programa rodar.
+// Desc: Ponto de inicio. Inicializa os filosofos e o monitor. O monitor encap
+//		 sula os garfos como channels de buffer 1, um mutex e uma variavel de
+//		 condicao. Cada filosofo roda como uma goroutine independente.
 //-----------------------------------------------------------------------------
 func main() {
-	var philosophers = 	make( []*philosopher_t, kSize )
-	var forks		 = 	make( []chan struct{} , kSize )
-	var wg			 	sync.WaitGroup
+	var philosophers 	= 	make( []*philosopher_t, kSize )
+	var monitor			= 	&monitor_t{ forks: make( []chan struct{}, kSize ) }
+	var wg					sync.WaitGroup
+	monitor.cond 		= 	sync.NewCond( &monitor.mu )
 
 	for idx := range kSize {
-		philosophers[ idx ] = &philosopher_t{ uid: uint8( idx ) }
-		forks[ idx ] 		= make( chan struct{}, 1 )
-		forks[ idx ] 		<- struct{}{}
+		philosophers[ idx ]		= &philosopher_t{ uid: uint8( idx ) }
+		monitor.forks[ idx ]	= make( chan struct{}, 1 )
+		monitor.forks[ idx ] 	<- struct{}{}
 	}
 
 	for idx := range kSize {
 		wg.Add( 1 )
-		go Dine( idx, philosophers, forks, &wg )
+		go Dine( idx, philosophers, monitor, &wg )
 	}
-	
+
 	wg.Wait()
 
 	for idx := range kSize {
